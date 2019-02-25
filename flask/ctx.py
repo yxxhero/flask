@@ -5,7 +5,7 @@
 
     Implements the objects required to keep the context.
 
-    :copyright: (c) 2015 by Armin Ronacher.
+    :copyright: © 2010 by the Pallets team.
     :license: BSD, see LICENSE for more details.
 """
 
@@ -24,18 +24,60 @@ _sentinel = object()
 
 
 class _AppCtxGlobals(object):
-    """A plain object."""
+    """A plain object. Used as a namespace for storing data during an
+    application context.
+
+    Creating an app context automatically creates this object, which is
+    made available as the :data:`g` proxy.
+
+    .. describe:: 'key' in g
+
+        Check whether an attribute is present.
+
+        .. versionadded:: 0.10
+
+    .. describe:: iter(g)
+
+        Return an iterator over the attribute names.
+
+        .. versionadded:: 0.10
+    """
 
     def get(self, name, default=None):
+        """Get an attribute by name, or a default value. Like
+        :meth:`dict.get`.
+
+        :param name: Name of attribute to get.
+        :param default: Value to return if the attribute is not present.
+
+        .. versionadded:: 0.10
+        """
         return self.__dict__.get(name, default)
 
     def pop(self, name, default=_sentinel):
+        """Get and remove an attribute by name. Like :meth:`dict.pop`.
+
+        :param name: Name of attribute to pop.
+        :param default: Value to return if the attribute is not present,
+            instead of raise a ``KeyError``.
+
+        .. versionadded:: 0.11
+        """
         if default is _sentinel:
             return self.__dict__.pop(name)
         else:
             return self.__dict__.pop(name, default)
 
     def setdefault(self, name, default=None):
+        """Get the value of an attribute if it is present, otherwise
+        set and return a default value. Like :meth:`dict.setdefault`.
+
+        :param name: Name of attribute to get.
+        :param: default: Value to set and return if the attribute is not
+            present.
+
+        .. versionadded:: 0.11
+        """
         return self.__dict__.setdefault(name, default)
 
     def __contains__(self, item):
@@ -80,7 +122,8 @@ def copy_current_request_context(f):
     """A helper function that decorates a function to retain the current
     request context.  This is useful when working with greenlets.  The moment
     the function is decorated a copy of the request context is created and
-    then pushed when the function is called.
+    then pushed when the function is called.  The current session is also
+    included in the copied request context.
 
     Example::
 
@@ -91,8 +134,8 @@ def copy_current_request_context(f):
         def index():
             @copy_current_request_context
             def do_some_work():
-                # do some work here, it can access flask.request like you
-                # would otherwise in the view function.
+                # do some work here, it can access flask.request or
+                # flask.session like you would otherwise in the view function.
                 ...
             gevent.spawn(do_some_work)
             return 'Regular response'
@@ -234,14 +277,18 @@ class RequestContext(object):
     that situation, otherwise your unittests will leak memory.
     """
 
-    def __init__(self, app, environ, request=None):
+    def __init__(self, app, environ, request=None, session=None):
         self.app = app
         if request is None:
             request = app.request_class(environ)
         self.request = request
-        self.url_adapter = app.create_url_adapter(self.request)
+        self.url_adapter = None
+        try:
+            self.url_adapter = app.create_url_adapter(self.request)
+        except HTTPException as e:
+            self.request.routing_exception = e
         self.flashes = None
-        self.session = None
+        self.session = session
 
         # Request contexts can be pushed multiple times and interleaved with
         # other request contexts.  Now only if the last level is popped we
@@ -262,7 +309,8 @@ class RequestContext(object):
         # functions.
         self._after_request_functions = []
 
-        self.match_request()
+        if self.url_adapter is not None:
+            self.match_request()
 
     def _get_g(self):
         return _app_ctx_stack.top.g
@@ -279,10 +327,15 @@ class RequestContext(object):
         request object is locked.
 
         .. versionadded:: 0.10
+
+        .. versionchanged:: 1.1
+           The current session object is used instead of reloading the original
+           data. This prevents `flask.session` pointing to an out-of-date object.
         """
         return self.__class__(self.app,
             environ=self.request.environ,
-            request=self.request
+            request=self.request,
+            session=self.session
         )
 
     def match_request(self):

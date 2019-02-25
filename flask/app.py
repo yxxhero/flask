@@ -5,9 +5,10 @@
 
     This module implements the central WSGI application object.
 
-    :copyright: (c) 2015 by Armin Ronacher.
+    :copyright: © 2010 by the Pallets team.
     :license: BSD, see LICENSE for more details.
 """
+
 import os
 import sys
 import warnings
@@ -19,16 +20,19 @@ from threading import Lock
 from werkzeug.datastructures import Headers, ImmutableDict
 from werkzeug.exceptions import BadRequest, BadRequestKeyError, HTTPException, \
     InternalServerError, MethodNotAllowed, default_exceptions
-from werkzeug.routing import BuildError, Map, RequestRedirect, Rule
+from werkzeug.routing import BuildError, Map, RequestRedirect, \
+    RoutingException, Rule
 
 from . import cli, json
 from ._compat import integer_types, reraise, string_types, text_type
 from .config import Config, ConfigAttribute
 from .ctx import AppContext, RequestContext, _AppCtxGlobals
 from .globals import _request_ctx_stack, g, request, session
-from .helpers import _PackageBoundObject, \
-    _endpoint_from_view_func, find_package, get_debug_flag, \
-    get_flashed_messages, locked_cached_property, url_for
+from .helpers import (
+    _PackageBoundObject,
+    _endpoint_from_view_func, find_package, get_env, get_debug_flag,
+    get_flashed_messages, locked_cached_property, url_for, get_load_dotenv
+)
 from .logging import create_logger
 from .sessions import SecureCookieSessionInterface
 from .signals import appcontext_tearing_down, got_request_exception, \
@@ -122,8 +126,13 @@ class Flask(_PackageBoundObject):
     .. versionadded:: 0.11
        The `root_path` parameter was added.
 
-    .. versionadded:: 0.13
-       The `host_matching` and `static_host` parameters were added.
+    .. versionadded:: 1.0
+       The ``host_matching`` and ``static_host`` parameters were added.
+
+    .. versionadded:: 1.0
+       The ``subdomain_matching`` parameter was added. Subdomain
+       matching needs to be enabled manually now. Setting
+       :data:`SERVER_NAME` does not implicitly enable it.
 
     :param import_name: the name of the application package
     :param static_url_path: can be used to specify a different path for the
@@ -132,11 +141,13 @@ class Flask(_PackageBoundObject):
     :param static_folder: the folder with static files that should be served
                           at `static_url_path`.  Defaults to the ``'static'``
                           folder in the root path of the application.
-    :param host_matching: sets the app's ``url_map.host_matching`` to the given
-                          value. Defaults to False.
-    :param static_host: the host to use when adding the static route. Defaults
-                        to None. Required when using ``host_matching=True``
-                        with a ``static_folder`` configured.
+    :param static_host: the host to use when adding the static route.
+        Defaults to None. Required when using ``host_matching=True``
+        with a ``static_folder`` configured.
+    :param host_matching: set ``url_map.host_matching`` attribute.
+        Defaults to False.
+    :param subdomain_matching: consider the subdomain relative to
+        :data:`SERVER_NAME` when matching routes. Defaults to False.
     :param template_folder: the folder that contains the templates that should
                             be used by the application.  Defaults to
                             ``'templates'`` folder in the root path of the
@@ -195,15 +206,6 @@ class Flask(_PackageBoundObject):
     #:
     #: .. versionadded:: 0.11
     config_class = Config
-
-    #: The debug flag.  Set this to ``True`` to enable debugging of the
-    #: application.  In debug mode the debugger will kick in when an unhandled
-    #: exception occurs and the integrated server will automatically reload
-    #: the application if changes in the code are detected.
-    #:
-    #: This attribute can also be configured from the config with the ``DEBUG``
-    #: configuration key.  Defaults to ``False``.
-    debug = ConfigAttribute('DEBUG')
 
     #: The testing flag.  Set this to ``True`` to enable the test mode of
     #: Flask extensions (and in the future probably also Flask itself).
@@ -278,7 +280,8 @@ class Flask(_PackageBoundObject):
 
     #: Default configuration parameters.
     default_config = ImmutableDict({
-        'DEBUG':                                get_debug_flag(default=False),
+        'ENV':                                  None,
+        'DEBUG':                                None,
         'TESTING':                              False,
         'PROPAGATE_EXCEPTIONS':                 None,
         'PRESERVE_CONTEXT_ON_EXCEPTION':        None,
@@ -292,6 +295,7 @@ class Flask(_PackageBoundObject):
         'SESSION_COOKIE_PATH':                  None,
         'SESSION_COOKIE_HTTPONLY':              True,
         'SESSION_COOKIE_SECURE':                False,
+        'SESSION_COOKIE_SAMESITE':              None,
         'SESSION_REFRESH_EACH_REQUEST':         True,
         'MAX_CONTENT_LENGTH':                   None,
         'SEND_FILE_MAX_AGE_DEFAULT':            timedelta(hours=12),
@@ -304,6 +308,7 @@ class Flask(_PackageBoundObject):
         'JSONIFY_PRETTYPRINT_REGULAR':          False,
         'JSONIFY_MIMETYPE':                     'application/json',
         'TEMPLATES_AUTO_RELOAD':                None,
+        'MAX_COOKIE_SIZE': 4093,
     })
 
     #: The rule object to use for URL rules created.  This is used by
@@ -316,6 +321,14 @@ class Flask(_PackageBoundObject):
     #:
     #: .. versionadded:: 0.7
     test_client_class = None
+
+    #: The :class:`~click.testing.CliRunner` subclass, by default
+    #: :class:`~flask.testing.FlaskCliRunner` that is used by
+    #: :meth:`test_cli_runner`. Its ``__init__`` method should take a
+    #: Flask app object as the first argument.
+    #:
+    #: .. versionadded:: 1.0
+    test_cli_runner_class = None
 
     #: the session interface to use.  By default an instance of
     #: :class:`~flask.sessions.SecureCookieSessionInterface` is used here.
@@ -345,6 +358,7 @@ class Flask(_PackageBoundObject):
         static_folder='static',
         static_host=None,
         host_matching=False,
+        subdomain_matching=False,
         template_folder='templates',
         instance_path=None,
         instance_relative_config=False,
@@ -528,6 +542,7 @@ class Flask(_PackageBoundObject):
         self.url_map = Map()
 
         self.url_map.host_matching = host_matching
+        self.subdomain_matching = subdomain_matching
 
         # tracks internally if the application already handled at least one
         # request.
@@ -647,7 +662,10 @@ class Flask(_PackageBoundObject):
         root_path = self.root_path
         if instance_relative:
             root_path = self.instance_path
-        return self.config_class(root_path, self.default_config)
+        defaults = dict(self.default_config)
+        defaults['ENV'] = get_env()
+        defaults['DEBUG'] = get_debug_flag()
+        return self.config_class(root_path, defaults)
 
     def auto_find_instance_path(self):
         """Tries to locate the instance path if it was not provided to the
@@ -790,25 +808,41 @@ class Flask(_PackageBoundObject):
             rv.update(processor())
         return rv
 
-    def _reconfigure_for_run_debug(self, debug):
-        """The ``run`` commands will set the application's debug flag. Some
-        application configuration may already be calculated based on the
-        previous debug value. This method will recalculate affected values.
+    #: What environment the app is running in. Flask and extensions may
+    #: enable behaviors based on the environment, such as enabling debug
+    #: mode. This maps to the :data:`ENV` config key. This is set by the
+    #: :envvar:`FLASK_ENV` environment variable and may not behave as
+    #: expected if set in code.
+    #:
+    #: **Do not enable development when deploying in production.**
+    #:
+    #: Default: ``'production'``
+    env = ConfigAttribute('ENV')
 
-        Called by the :func:`flask.cli.run` command or :meth:`Flask.run`
-        method if the debug flag is set explicitly in the call.
+    def _get_debug(self):
+        return self.config['DEBUG']
 
-        :param debug: the new value of the debug flag
-
-        .. versionadded:: 1.0
-            Reconfigures ``app.jinja_env.auto_reload``.
-        """
-        self.debug = debug
+    def _set_debug(self, value):
+        self.config['DEBUG'] = value
         self.jinja_env.auto_reload = self.templates_auto_reload
 
-    def run(
-        self, host=None, port=None, debug=None, load_dotenv=True, **options
-    ):
+    #: Whether debug mode is enabled. When using ``flask run`` to start
+    #: the development server, an interactive debugger will be shown for
+    #: unhandled exceptions, and the server will be reloaded when code
+    #: changes. This maps to the :data:`DEBUG` config key. This is
+    #: enabled when :attr:`env` is ``'development'`` and is overridden
+    #: by the ``FLASK_DEBUG`` environment variable. It may not behave as
+    #: expected if set in code.
+    #:
+    #: **Do not enable debug mode when deploying in production.**
+    #:
+    #: Default: ``True`` if :attr:`env` is ``'development'``, or
+    #: ``False`` otherwise.
+    debug = property(_get_debug, _set_debug)
+    del _get_debug, _set_debug
+
+    def run(self, host=None, port=None, debug=None,
+            load_dotenv=True, **options):
         """Runs the application on a local development server.
 
         Do not use ``run()`` in a production setting. It is not intended to
@@ -856,27 +890,40 @@ class Flask(_PackageBoundObject):
             If installed, python-dotenv will be used to load environment
             variables from :file:`.env` and :file:`.flaskenv` files.
 
-        .. versionchanged:: 0.10
-           The default port is now picked from the ``SERVER_NAME`` variable.
+            If set, the :envvar:`FLASK_ENV` and :envvar:`FLASK_DEBUG`
+            environment variables will override :attr:`env` and
+            :attr:`debug`.
 
+            Threaded mode is enabled by default.
+
+        .. versionchanged:: 0.10
+            The default port is now picked from the ``SERVER_NAME``
+            variable.
         """
         # Change this into a no-op if the server is invoked from the
-        # command line.  Have a look at cli.py for more information.
+        # command line. Have a look at cli.py for more information.
         if os.environ.get('FLASK_RUN_FROM_CLI') == 'true':
             from .debughelpers import explain_ignored_app_run
             explain_ignored_app_run()
             return
 
-        if load_dotenv:
-            from flask.cli import load_dotenv
-            load_dotenv()
+        if get_load_dotenv(load_dotenv):
+            cli.load_dotenv()
 
+            # if set, let env vars override previous values
+            if 'FLASK_ENV' in os.environ:
+                self.env = get_env()
+                self.debug = get_debug_flag()
+            elif 'FLASK_DEBUG' in os.environ:
+                self.debug = get_debug_flag()
+
+        # debug passed to method overrides all other sources
         if debug is not None:
-            self._reconfigure_for_run_debug(bool(debug))
+            self.debug = bool(debug)
 
         _host = '127.0.0.1'
         _port = 5000
-        server_name = self.config.get("SERVER_NAME")
+        server_name = self.config.get('SERVER_NAME')
         sn_host, sn_port = None, None
 
         if server_name:
@@ -884,8 +931,12 @@ class Flask(_PackageBoundObject):
 
         host = host or sn_host or _host
         port = int(port or sn_port or _port)
+
         options.setdefault('use_reloader', self.debug)
         options.setdefault('use_debugger', self.debug)
+        options.setdefault('threaded', True)
+
+        cli.show_server_banner(self.env, self.debug, self.name, False)
 
         from werkzeug.serving import run_simple
 
@@ -952,6 +1003,23 @@ class Flask(_PackageBoundObject):
         if cls is None:
             from flask.testing import FlaskClient as cls
         return cls(self, self.response_class, use_cookies=use_cookies, **kwargs)
+
+    def test_cli_runner(self, **kwargs):
+        """Create a CLI runner for testing CLI commands.
+        See :ref:`testing-cli`.
+
+        Returns an instance of :attr:`test_cli_runner_class`, by default
+        :class:`~flask.testing.FlaskCliRunner`. The Flask app object is
+        passed as the first argument.
+
+        .. versionadded:: 1.0
+        """
+        cls = self.test_cli_runner_class
+
+        if cls is None:
+            from flask.testing import FlaskCliRunner as cls
+
+        return cls(self, **kwargs)
 
     def open_session(self, request):
         """Creates or opens a new session.  Default implementation stores all
@@ -1055,7 +1123,8 @@ class Flask(_PackageBoundObject):
         return iter(self._blueprint_order)
 
     @setupmethod
-    def add_url_rule(self, rule, endpoint=None, view_func=None, provide_automatic_options=None, **options):
+    def add_url_rule(self, rule, endpoint=None, view_func=None,
+                     provide_automatic_options=None, **options):
         """Connects a URL rule.  Works exactly like the :meth:`route`
         decorator.  If a view_func is provided it will be registered with the
         endpoint.
@@ -1563,11 +1632,27 @@ class Flask(_PackageBoundObject):
         registered error handlers and fall back to returning the
         exception as response.
 
+        .. versionchanged:: 1.0.3
+            ``RoutingException``, used internally for actions such as
+             slash redirects during routing, is not passed to error
+             handlers.
+
+        .. versionchanged:: 1.0
+            Exceptions are looked up by code *and* by MRO, so
+            ``HTTPExcpetion`` subclasses can be handled with a catch-all
+            handler for the base ``HTTPException``.
+
         .. versionadded:: 0.3
         """
         # Proxy exceptions don't have error codes.  We want to always return
         # those unchanged as errors
         if e.code is None:
+            return e
+
+        # RoutingExceptions are used internally to trigger routing
+        # actions, such as slash redirects raising RequestRedirect. They
+        # are not raised or handled in user code.
+        if isinstance(e, RoutingException):
             return e
 
         handler = self._find_error_handler(e)
@@ -1597,23 +1682,30 @@ class Flask(_PackageBoundObject):
 
         trap_bad_request = self.config['TRAP_BAD_REQUEST_ERRORS']
 
-        # if unset, trap based on debug mode
-        if (trap_bad_request is None and self.debug) or trap_bad_request:
+        # if unset, trap key errors in debug mode
+        if (
+            trap_bad_request is None and self.debug
+            and isinstance(e, BadRequestKeyError)
+        ):
+            return True
+
+        if trap_bad_request:
             return isinstance(e, BadRequest)
 
         return False
 
     def handle_user_exception(self, e):
-        """This method is called whenever an exception occurs that should be
-        handled.  A special case are
-        :class:`~werkzeug.exception.HTTPException`\s which are forwarded by
-        this function to the :meth:`handle_http_exception` method.  This
-        function will either return a response value or reraise the
-        exception with the same traceback.
+        """This method is called whenever an exception occurs that
+        should be handled. A special case is :class:`~werkzeug
+        .exceptions.HTTPException` which is forwarded to the
+        :meth:`handle_http_exception` method. This function will either
+        return a response value or reraise the exception with the same
+        traceback.
 
         .. versionchanged:: 1.0
-            Key errors raised from request data like ``form`` show the the bad
-            key in debug mode rather than a generic bad request message.
+            Key errors raised from request data like ``form`` show the
+            bad key in debug mode rather than a generic bad request
+            message.
 
         .. versionadded:: 0.7
         """
@@ -1624,16 +1716,17 @@ class Flask(_PackageBoundObject):
         # we cannot prevent users from trashing it themselves in a custom
         # trap_http_exception method so that's their fault then.
 
-        # MultiDict passes the key to the exception, but that's ignored
-        # when generating the response message. Set an informative
-        # description for key errors in debug mode or when trapping errors.
-        if (
-            (self.debug or self.config['TRAP_BAD_REQUEST_ERRORS'])
-            and isinstance(e, BadRequestKeyError)
-            # only set it if it's still the default description
-            and e.description is BadRequestKeyError.description
-        ):
-            e.description = "KeyError: '{0}'".format(*e.args)
+        if isinstance(e, BadRequestKeyError):
+            if self.debug or self.config["TRAP_BAD_REQUEST_ERRORS"]:
+                # Werkzeug < 0.15 doesn't add the KeyError to the 400
+                # message, add it in manually.
+                description = e.get_description()
+
+                if e.args[0] not in description:
+                    e.description = "KeyError: '{}'".format(*e.args)
+            else:
+                # Werkzeug >= 0.15 does add it, remove it in production
+                e.args = ()
 
         if isinstance(e, HTTPException) and not self.trap_http_exception(e):
             return self.handle_http_exception(e)
@@ -1654,9 +1747,7 @@ class Flask(_PackageBoundObject):
         .. versionadded:: 0.3
         """
         exc_type, exc_value, tb = sys.exc_info()
-
         got_request_exception.send(self, exception=e)
-        handler = self._find_error_handler(InternalServerError())
 
         if self.propagate_exceptions:
             # if we want to repropagate the exception, we can attempt to
@@ -1669,6 +1760,7 @@ class Flask(_PackageBoundObject):
                 raise e
 
         self.log_exception((exc_type, exc_value, tb))
+        handler = self._find_error_handler(InternalServerError())
         if handler is None:
             return InternalServerError()
         return self.finalize_request(handler(e), from_error_handler=True)
@@ -1857,7 +1949,7 @@ class Flask(_PackageBoundObject):
         status = headers = None
 
         # unpack tuple returns
-        if isinstance(rv, (tuple, list)):
+        if isinstance(rv, tuple):
             len_rv = len(rv)
 
             # a 3-tuple is unpacked directly
@@ -1921,19 +2013,30 @@ class Flask(_PackageBoundObject):
         return rv
 
     def create_url_adapter(self, request):
-        """Creates a URL adapter for the given request.  The URL adapter
-        is created at a point where the request context is not yet set up
-        so the request is passed explicitly.
+        """Creates a URL adapter for the given request. The URL adapter
+        is created at a point where the request context is not yet set
+        up so the request is passed explicitly.
 
         .. versionadded:: 0.6
 
         .. versionchanged:: 0.9
            This can now also be called without a request object when the
            URL adapter is created for the application context.
+
+        .. versionchanged:: 1.0
+            :data:`SERVER_NAME` no longer implicitly enables subdomain
+            matching. Use :attr:`subdomain_matching` instead.
         """
         if request is not None:
-            return self.url_map.bind_to_environ(request.environ,
-                server_name=self.config['SERVER_NAME'])
+            # If subdomain matching is disabled (the default), use the
+            # default subdomain in all cases. This should be the default
+            # in Werkzeug but it currently does not have that feature.
+            subdomain = ((self.url_map.default_subdomain or None)
+                         if not self.subdomain_matching else None)
+            return self.url_map.bind_to_environ(
+                request.environ,
+                server_name=self.config['SERVER_NAME'],
+                subdomain=subdomain)
         # We need at the very least the server name to be set for this
         # to work.
         if self.config['SERVER_NAME'] is not None:
@@ -2030,15 +2133,25 @@ class Flask(_PackageBoundObject):
         return response
 
     def do_teardown_request(self, exc=_sentinel):
-        """Called after the actual request dispatching and will
-        call every as :meth:`teardown_request` decorated function.  This is
-        not actually called by the :class:`Flask` object itself but is always
-        triggered when the request context is popped.  That way we have a
-        tighter control over certain resources under testing environments.
+        """Called after the request is dispatched and the response is
+        returned, right before the request context is popped.
+
+        This calls all functions decorated with
+        :meth:`teardown_request`, and :meth:`Blueprint.teardown_request`
+        if a blueprint handled the request. Finally, the
+        :data:`request_tearing_down` signal is sent.
+
+        This is called by
+        :meth:`RequestContext.pop() <flask.ctx.RequestContext.pop>`,
+        which may be delayed during testing to maintain access to
+        resources.
+
+        :param exc: An unhandled exception raised while dispatching the
+            request. Detected from the current exception information if
+            not passed. Passed to each teardown function.
 
         .. versionchanged:: 0.9
-           Added the `exc` argument.  Previously this was always using the
-           current exception information.
+            Added the ``exc`` argument.
         """
         if exc is _sentinel:
             exc = sys.exc_info()[1]
@@ -2051,9 +2164,17 @@ class Flask(_PackageBoundObject):
         request_tearing_down.send(self, exc=exc)
 
     def do_teardown_appcontext(self, exc=_sentinel):
-        """Called when an application context is popped.  This works pretty
-        much the same as :meth:`do_teardown_request` but for the application
-        context.
+        """Called right before the application context is popped.
+
+        When handling a request, the application context is popped
+        after the request context. See :meth:`do_teardown_request`.
+
+        This calls all functions decorated with
+        :meth:`teardown_appcontext`. Then the
+        :data:`appcontext_tearing_down` signal is sent.
+
+        This is called by
+        :meth:`AppContext.pop() <flask.ctx.AppContext.pop>`.
 
         .. versionadded:: 0.9
         """
@@ -2064,62 +2185,89 @@ class Flask(_PackageBoundObject):
         appcontext_tearing_down.send(self, exc=exc)
 
     def app_context(self):
-        """Binds the application only.  For as long as the application is bound
-        to the current context the :data:`flask.current_app` points to that
-        application.  An application context is automatically created when a
-        request context is pushed if necessary.
+        """Create an :class:`~flask.ctx.AppContext`. Use as a ``with``
+        block to push the context, which will make :data:`current_app`
+        point at this application.
 
-        Example usage::
+        An application context is automatically pushed by
+        :meth:`RequestContext.push() <flask.ctx.RequestContext.push>`
+        when handling a request, and when running a CLI command. Use
+        this to manually create a context outside of these situations.
+
+        ::
 
             with app.app_context():
-                ...
+                init_db()
+
+        See :doc:`/appcontext`.
 
         .. versionadded:: 0.9
         """
         return AppContext(self)
 
     def request_context(self, environ):
-        """Creates a :class:`~flask.ctx.RequestContext` from the given
-        environment and binds it to the current context.  This must be used in
-        combination with the ``with`` statement because the request is only bound
-        to the current context for the duration of the ``with`` block.
+        """Create a :class:`~flask.ctx.RequestContext` representing a
+        WSGI environment. Use a ``with`` block to push the context,
+        which will make :data:`request` point at this request.
 
-        Example usage::
+        See :doc:`/reqcontext`.
 
-            with app.request_context(environ):
-                do_something_with(request)
-
-        The object returned can also be used without the ``with`` statement
-        which is useful for working in the shell.  The example above is
-        doing exactly the same as this code::
-
-            ctx = app.request_context(environ)
-            ctx.push()
-            try:
-                do_something_with(request)
-            finally:
-                ctx.pop()
-
-        .. versionchanged:: 0.3
-           Added support for non-with statement usage and ``with`` statement
-           is now passed the ctx object.
+        Typically you should not call this from your own code. A request
+        context is automatically pushed by the :meth:`wsgi_app` when
+        handling a request. Use :meth:`test_request_context` to create
+        an environment and context instead of this method.
 
         :param environ: a WSGI environment
         """
         return RequestContext(self, environ)
 
     def test_request_context(self, *args, **kwargs):
-        """Creates a WSGI environment from the given values (see
-        :class:`werkzeug.test.EnvironBuilder` for more information, this
-        function accepts the same arguments plus two additional).
+        """Create a :class:`~flask.ctx.RequestContext` for a WSGI
+        environment created from the given values. This is mostly useful
+        during testing, where you may want to run a function that uses
+        request data without dispatching a full request.
 
-        Additional arguments (only if ``base_url`` is not specified):
+        See :doc:`/reqcontext`.
 
-        :param subdomain: subdomain to use for route matching
-        :param url_scheme: scheme for the request, default
-            ``PREFERRED_URL_SCHEME`` or ``http``.
+        Use a ``with`` block to push the context, which will make
+        :data:`request` point at the request for the created
+        environment. ::
+
+            with test_request_context(...):
+                generate_report()
+
+        When using the shell, it may be easier to push and pop the
+        context manually to avoid indentation. ::
+
+            ctx = app.test_request_context(...)
+            ctx.push()
+            ...
+            ctx.pop()
+
+        Takes the same arguments as Werkzeug's
+        :class:`~werkzeug.test.EnvironBuilder`, with some defaults from
+        the application. See the linked Werkzeug docs for most of the
+        available arguments. Flask-specific behavior is listed here.
+
+        :param path: URL path being requested.
+        :param base_url: Base URL where the app is being served, which
+            ``path`` is relative to. If not given, built from
+            :data:`PREFERRED_URL_SCHEME`, ``subdomain``,
+            :data:`SERVER_NAME`, and :data:`APPLICATION_ROOT`.
+        :param subdomain: Subdomain name to append to
+            :data:`SERVER_NAME`.
+        :param url_scheme: Scheme to use instead of
+            :data:`PREFERRED_URL_SCHEME`.
+        :param data: The request body, either as a string or a dict of
+            form keys and values.
+        :param json: If given, this is serialized as JSON and passed as
+            ``data``. Also defaults ``content_type`` to
+            ``application/json``.
+        :param args: other positional arguments passed to
+            :class:`~werkzeug.test.EnvironBuilder`.
+        :param kwargs: other keyword arguments passed to
+            :class:`~werkzeug.test.EnvironBuilder`.
         """
-
         from flask.testing import make_test_environ_builder
 
         builder = make_test_environ_builder(self, *args, **kwargs)
@@ -2130,9 +2278,9 @@ class Flask(_PackageBoundObject):
             builder.close()
 
     def wsgi_app(self, environ, start_response):
-        """The actual WSGI application.  This is not implemented in
-        `__call__` so that middlewares can be applied without losing a
-        reference to the class.  So instead of doing this::
+        """The actual WSGI application. This is not implemented in
+        :meth:`__call__` so that middlewares can be applied without
+        losing a reference to the app object. Instead of doing this::
 
             app = MyMiddleware(app)
 
@@ -2144,15 +2292,15 @@ class Flask(_PackageBoundObject):
         can continue to call methods on it.
 
         .. versionchanged:: 0.7
-           The behavior of the before and after request callbacks was changed
-           under error conditions and a new callback was added that will
-           always execute at the end of the request, independent on if an
-           error occurred or not.  See :ref:`callbacks-and-errors`.
+            Teardown events for the request and app contexts are called
+            even if an unhandled error occurs. Other events may not be
+            called depending on when an error occurs during dispatch.
+            See :ref:`callbacks-and-errors`.
 
-        :param environ: a WSGI environment
-        :param start_response: a callable accepting a status code,
-                               a list of headers and an optional
-                               exception context to start the response
+        :param environ: A WSGI environment.
+        :param start_response: A callable accepting a status code,
+            a list of headers, and an optional exception context to
+            start the response.
         """
         ctx = self.request_context(environ)
         error = None
@@ -2173,7 +2321,9 @@ class Flask(_PackageBoundObject):
             ctx.auto_pop(error)
 
     def __call__(self, environ, start_response):
-        """Shortcut for :attr:`wsgi_app`."""
+        """The WSGI server calls the Flask application object as the
+        WSGI application. This calls :meth:`wsgi_app` which can be
+        wrapped to applying middleware."""
         return self.wsgi_app(environ, start_response)
 
     def __repr__(self):

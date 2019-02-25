@@ -18,7 +18,7 @@ You can then use that with your favourite testing solution.
 In this documentation we will use the `pytest`_ package as the base
 framework for our tests. You can install it with ``pip``, like so::
 
-    pip install pytest
+    $ pip install pytest
 
 .. _pytest:
    https://pytest.org
@@ -28,10 +28,7 @@ The Application
 
 First, we need an application to test; we will use the application from
 the :ref:`tutorial`.  If you don't have that application yet, get the
-source code from `the examples`_.
-
-.. _the examples:
-   https://github.com/pallets/flask/tree/master/examples/flaskr/
+source code from :gh:`the examples <examples/tutorial>`.
 
 The Testing Skeleton
 --------------------
@@ -43,7 +40,7 @@ pytest.
 
 Next, we create a `pytest fixture`_ called
 :func:`client` that configures
-the application for testing and initializes a new database.::
+the application for testing and initializes a new database::
 
     import os
     import tempfile
@@ -212,12 +209,6 @@ Running that should now give us three passing tests::
 
     ============= 3 passed in 0.23 seconds ==============
 
-For more complex tests with headers and status codes, check out the
-`MiniTwit Example`_ from the sources which contains a larger test
-suite.
-
-.. _MiniTwit Example:
-   https://github.com/pallets/flask/tree/master/examples/minitwit/
 
 Other Testing Tricks
 --------------------
@@ -397,7 +388,7 @@ very convenient::
 
     with app.test_client() as c:
         rv = c.post('/api/auth', json={
-            'username': 'flask', 'password': 'secret'
+            'email': 'flask@example.com', 'password': 'secret'
         })
         json_data = rv.get_json()
         assert verify_token(email, json_data['token'])
@@ -406,3 +397,60 @@ Passing the ``json`` argument in the test client methods sets the request data
 to the JSON-serialized object and sets the content type to
 ``application/json``. You can get the JSON data from the request or response
 with ``get_json``.
+
+
+.. _testing-cli:
+
+Testing CLI Commands
+--------------------
+
+Click comes with `utilities for testing`_ your CLI commands. A
+:class:`~click.testing.CliRunner` runs commands in isolation and
+captures the output in a :class:`~click.testing.Result` object.
+
+Flask provides :meth:`~flask.Flask.test_cli_runner` to create a
+:class:`~flask.testing.FlaskCliRunner` that passes the Flask app to the
+CLI automatically. Use its :meth:`~flask.testing.FlaskCliRunner.invoke`
+method to call commands in the same way they would be called from the
+command line. ::
+
+    import click
+
+    @app.cli.command('hello')
+    @click.option('--name', default='World')
+    def hello_command(name)
+        click.echo(f'Hello, {name}!')
+
+    def test_hello():
+        runner = app.test_cli_runner()
+
+        # invoke the command directly
+        result = runner.invoke(hello_command, ['--name', 'Flask'])
+        assert 'Hello, Flask' in result.output
+
+        # or by name
+        result = runner.invoke(args=['hello'])
+        assert 'World' in result.output
+
+In the example above, invoking the command by name is useful because it
+verifies that the command was correctly registered with the app.
+
+If you want to test how your command parses parameters, without running
+the command, use its :meth:`~click.BaseCommand.make_context` method.
+This is useful for testing complex validation rules and custom types. ::
+
+    def upper(ctx, param, value):
+        if value is not None:
+            return value.upper()
+
+    @app.cli.command('hello')
+    @click.option('--name', default='World', callback=upper)
+    def hello_command(name)
+        click.echo(f'Hello, {name}!')
+
+    def test_hello_params():
+        context = hello_command.make_context('hello', ['--name', 'flask'])
+        assert context.params['name'] == 'FLASK'
+
+.. _click: http://click.pocoo.org/
+.. _utilities for testing: http://click.pocoo.org/testing

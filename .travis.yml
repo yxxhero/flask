@@ -1,28 +1,40 @@
-sudo: false
+os: linux
+dist: xenial
 language: python
+python:
+  - "3.7"
+  - "3.6"
+  - "3.5"
+  - "3.4"
+  - "2.7"
+  - nightly
+  - pypy3.5-6.0
+env: TOXENV=py,codecov
 
 matrix:
   include:
-    - python: 3.6
-      env: TOXENV=py,codecov
-    - python: 3.5
-      env: TOXENV=py,codecov
-    - python: 3.4
-      env: TOXENV=py,codecov
-    - python: 3.3
-      env: TOXENV=py,codecov
-    - python: 2.7
-      env: TOXENV=py,codecov
-    - python: 2.6
-      env: TOXENV=py,codecov
-    - python: pypy
-      env: TOXENV=py,codecov
+    - env: TOXENV=docs-html
+    - env: TOXENV=devel,lowest,codecov
+# disabled because before_install is too slow
+#    - os: osx
+#      language: generic
+#      env: TOXENV=py3,codecov
+#      cache:
+#        directories:
+#          - $HOME/Library/Caches/Homebrew
+#          - $HOME/Library/Caches/pip
+  allow_failures:
     - python: nightly
-      env: TOXENV=py
-    - python: 3.6
-      env: TOXENV=docs-html
-    - python: 3.6
-      env: TOXENV=py-simplejson,codecov
+    - python: pypy3.5-6.0
+    - os: osx
+  fast_finish: true
+
+before_install:
+  - |
+    if [[ $TRAVIS_OS_NAME == 'osx' ]]; then
+      brew upgrade python
+      export PATH="/usr/local/opt/python/libexec/bin:${PATH}"
+    fi
 
 install:
   - pip install tox
@@ -31,19 +43,15 @@ script:
   - tox
 
 cache:
-  - pip
+  directories:
+    - $HOME/.cache/pip
+    - $HOME/.cache/pre-commit
 
 branches:
   only:
     - master
-    - /^.*-maintenance$/
+    - /^\d+(\.\d+)*-maintenance$/
+    - /^\d+(\.\d+)*(\.x)?$/
 
 notifications:
   email: false
-  irc:
-    channels:
-      - "chat.freenode.net#pocoo"
-    on_success: change
-    on_failure: always
-    use_notice: true
-    skip_join: true

@@ -6,27 +6,45 @@
     Implements test support helpers.  This module is lazily imported
     and usually not used in production environments.
 
-    :copyright: (c) 2015 by Armin Ronacher.
+    :copyright: © 2010 by the Pallets team.
     :license: BSD, see LICENSE for more details.
 """
 
 import werkzeug
 from contextlib import contextmanager
+
+from click.testing import CliRunner
+from flask.cli import ScriptInfo
 from werkzeug.test import Client, EnvironBuilder
 from flask import _request_ctx_stack
 from flask.json import dumps as json_dumps
-
-try:
-    from werkzeug.urls import url_parse
-except ImportError:
-    from urlparse import urlsplit as url_parse
+from werkzeug.urls import url_parse
 
 
 def make_test_environ_builder(
     app, path='/', base_url=None, subdomain=None, url_scheme=None,
     *args, **kwargs
 ):
-    """Creates a new test builder with some application defaults thrown in."""
+    """Create a :class:`~werkzeug.test.EnvironBuilder`, taking some
+    defaults from the application.
+
+    :param app: The Flask application to configure the environment from.
+    :param path: URL path being requested.
+    :param base_url: Base URL where the app is being served, which
+        ``path`` is relative to. If not given, built from
+        :data:`PREFERRED_URL_SCHEME`, ``subdomain``,
+        :data:`SERVER_NAME`, and :data:`APPLICATION_ROOT`.
+    :param subdomain: Subdomain name to append to :data:`SERVER_NAME`.
+    :param url_scheme: Scheme to use instead of
+        :data:`PREFERRED_URL_SCHEME`.
+    :param json: If given, this is serialized as JSON and passed as
+        ``data``. Also defaults ``content_type`` to
+        ``application/json``.
+    :param args: other positional arguments passed to
+        :class:`~werkzeug.test.EnvironBuilder`.
+    :param kwargs: other keyword arguments passed to
+        :class:`~werkzeug.test.EnvironBuilder`.
+    """
 
     assert (
         not (base_url or subdomain or url_scheme)
@@ -197,3 +215,36 @@ class FlaskClient(Client):
         top = _request_ctx_stack.top
         if top is not None and top.preserved:
             top.pop()
+
+
+class FlaskCliRunner(CliRunner):
+    """A :class:`~click.testing.CliRunner` for testing a Flask app's
+    CLI commands. Typically created using
+    :meth:`~flask.Flask.test_cli_runner`. See :ref:`testing-cli`.
+    """
+    def __init__(self, app, **kwargs):
+        self.app = app
+        super(FlaskCliRunner, self).__init__(**kwargs)
+
+    def invoke(self, cli=None, args=None, **kwargs):
+        """Invokes a CLI command in an isolated environment. See
+        :meth:`CliRunner.invoke <click.testing.CliRunner.invoke>` for
+        full method documentation. See :ref:`testing-cli` for examples.
+
+        If the ``obj`` argument is not given, passes an instance of
+        :class:`~flask.cli.ScriptInfo` that knows how to load the Flask
+        app being tested.
+
+        :param cli: Command object to invoke. Default is the app's
+            :attr:`~flask.app.Flask.cli` group.
+        :param args: List of strings to invoke the command with.
+
+        :return: a :class:`~click.testing.Result` object.
+        """
+        if cli is None:
+            cli = self.app.cli
+
+        if 'obj' not in kwargs:
+            kwargs['obj'] = ScriptInfo(create_app=lambda: self.app)
+
+        return super(FlaskCliRunner, self).invoke(cli, args, **kwargs)

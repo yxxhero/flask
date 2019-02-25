@@ -85,7 +85,7 @@ should see your hello world greeting.
    you can make the server publicly available simply by adding
    ``--host=0.0.0.0`` to the command line::
 
-       flask run --host=0.0.0.0
+       $ flask run --host=0.0.0.0
 
    This tells your operating system to listen on all public IPs.
 
@@ -130,19 +130,23 @@ That is not very nice and Flask can do better.  If you enable debug
 support the server will reload itself on code changes, and it will also
 provide you with a helpful debugger if things go wrong.
 
-To enable debug mode you can export the ``FLASK_DEBUG`` environment variable
+To enable all development features (including debug mode) you can export
+the ``FLASK_ENV`` environment variable and set it to ``development``
 before running the server::
 
-    $ export FLASK_DEBUG=1
+    $ export FLASK_ENV=development
     $ flask run
 
-(On Windows you need to use ``set`` instead of ``export``).
+(On Windows you need to use ``set`` instead of ``export``.)
 
 This does the following things:
 
 1.  it activates the debugger
 2.  it activates the automatic reloader
 3.  it enables the debug mode on the Flask application.
+
+You can also control debug mode separately from the environment by
+exporting ``FLASK_DEBUG=1``.
 
 There are more parameters that are explained in the :ref:`server` docs.
 
@@ -224,7 +228,7 @@ Converter types:
 Unique URLs / Redirection Behavior
 ``````````````````````````````````
 
-Take these two rules::
+The following two rules differ in their use of a trailing slash. ::
 
     @app.route('/projects/')
     def projects():
@@ -234,20 +238,17 @@ Take these two rules::
     def about():
         return 'The about page'
 
-Though they look similar, they differ in their use of the trailing slash in
-the URL. In the first case, the canonical URL for the ``projects`` endpoint
-uses a trailing slash. It's similar to a folder in a file system; if you
-access the URL without a trailing slash, Flask redirects you to the
-canonical URL with the trailing slash.
+The canonical URL for the ``projects`` endpoint has a trailing slash.
+It's similar to a folder in a file system. If you access the URL without
+a trailing slash, Flask redirects you to the canonical URL with the
+trailing slash.
 
-In the second case, however, the URL definition lacks a trailing slash,
-like the pathname of a file on UNIX-like systems. Accessing the URL with a
-trailing slash produces a 404 “Not Found” error.
+The canonical URL for the ``about`` endpoint does not have a trailing
+slash. It's similar to the pathname of a file. Accessing the URL with a
+trailing slash produces a 404 "Not Found" error. This helps keep URLs
+unique for these resources, which helps search engines avoid indexing
+the same page twice.
 
-This behavior allows relative URLs to continue working even if the trailing
-slash is omitted, consistent with how Apache and other servers work. Also,
-the URLs will stay unique, which helps search engines avoid indexing the
-same page twice.
 
 .. _url-building:
 
@@ -264,17 +265,21 @@ Why would you want to build URLs using the URL reversing function
 
 1. Reversing is often more descriptive than hard-coding the URLs.
 2. You can change your URLs in one go instead of needing to remember to
-    manually change hard-coded URLs.
+   manually change hard-coded URLs.
 3. URL building handles escaping of special characters and Unicode data
-    transparently.
-4. If your application is placed outside the URL root, for example, in
-    ``/myapplication`` instead of ``/``, :func:`~flask.url_for` properly
-    handles that for you.
+   transparently.
+4. The generated paths are always absolute, avoiding unexpected behavior
+   of relative paths in browsers.
+5. If your application is placed outside the URL root, for example, in
+   ``/myapplication`` instead of ``/``, :func:`~flask.url_for` properly
+   handles that for you.
 
 For example, here we use the :meth:`~flask.Flask.test_request_context` method
 to try out :func:`~flask.url_for`. :meth:`~flask.Flask.test_request_context`
 tells Flask to behave as though it's handling a request even while we use a
-Python shell. See :ref:`context-locals`. ::
+Python shell. See :ref:`context-locals`.
+
+.. code-block:: python
 
     from flask import Flask, url_for
 
@@ -290,7 +295,7 @@ Python shell. See :ref:`context-locals`. ::
 
     @app.route('/user/<username>')
     def profile(username):
-        return '{}'s profile'.format(username)
+        return '{}\'s profile'.format(username)
 
     with app.test_request_context():
         print(url_for('index'))
@@ -298,10 +303,13 @@ Python shell. See :ref:`context-locals`. ::
         print(url_for('login', next='/'))
         print(url_for('profile', username='John Doe'))
 
+.. code-block:: text
+
     /
     /login
     /login?next=/
     /user/John%20Doe
+
 
 HTTP Methods
 ````````````
@@ -312,15 +320,17 @@ a route only answers to ``GET`` requests. You can use the ``methods`` argument
 of the :meth:`~flask.Flask.route` decorator to handle different HTTP methods.
 ::
 
+    from flask import request
+
     @app.route('/login', methods=['GET', 'POST'])
     def login():
         if request.method == 'POST':
-            do_the_login()
+            return do_the_login()
         else:
-            show_the_login_form()
+            return show_the_login_form()
 
 If ``GET`` is present, Flask automatically adds support for the ``HEAD`` method
-and handles ``HEAD`` requests according to the the `HTTP RFC`_. Likewise,
+and handles ``HEAD`` requests according to the `HTTP RFC`_. Likewise,
 ``OPTIONS`` is automatically implemented for you.
 
 .. _HTTP RFC: https://www.ietf.org/rfc/rfc2068.txt

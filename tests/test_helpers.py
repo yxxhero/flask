@@ -5,23 +5,27 @@
 
     Various helpers.
 
-    :copyright: (c) 2015 by Armin Ronacher.
+    :copyright: © 2010 by the Pallets team.
     :license: BSD, see LICENSE for more details.
 """
 
 import datetime
+import io
 import os
 import uuid
 
 import pytest
 from werkzeug.datastructures import Range
 from werkzeug.exceptions import BadRequest, NotFound
-from werkzeug.http import http_date, parse_cache_control_header, \
+from werkzeug.http import (
+    http_date, parse_cache_control_header,
     parse_options_header
+)
 
 import flask
+from flask import json
 from flask._compat import StringIO, text_type
-from flask.helpers import get_debug_flag
+from flask.helpers import get_debug_flag, get_env
 
 
 def has_encoding(name):
@@ -31,6 +35,19 @@ def has_encoding(name):
         return True
     except LookupError:
         return False
+
+
+class FakePath(object):
+    """Fake object to represent a ``PathLike object``.
+
+    This represents a ``pathlib.Path`` object in python 3.
+    See: https://www.python.org/dev/peps/pep-0519/
+    """
+    def __init__(self, path):
+        self.path = path
+
+    def __fspath__(self):
+        return self.path
 
 
 class FixedOffset(datetime.tzinfo):
@@ -55,12 +72,42 @@ class FixedOffset(datetime.tzinfo):
 
 
 class TestJSON(object):
+    @pytest.mark.parametrize('value', (
+        1, 't', True, False, None,
+        [], [1, 2, 3],
+        {}, {'foo': u'🐍'},
+    ))
+    @pytest.mark.parametrize('encoding', (
+        'utf-8', 'utf-8-sig',
+        'utf-16-le', 'utf-16-be', 'utf-16',
+        'utf-32-le', 'utf-32-be', 'utf-32',
+    ))
+    def test_detect_encoding(self, value, encoding):
+        data = json.dumps(value).encode(encoding)
+        assert json.detect_encoding(data) == encoding
+        assert json.loads(data) == value
+
     def test_ignore_cached_json(self, app):
         with app.test_request_context('/', method='POST', data='malformed',
                                       content_type='application/json'):
             assert flask.request.get_json(silent=True, cache=True) is None
             with pytest.raises(BadRequest):
                 flask.request.get_json(silent=False, cache=False)
+
+    def test_different_silent_on_bad_request(self, app):
+        with app.test_request_context(
+                '/', method='POST', data='malformed',
+                content_type='application/json'):
+            assert flask.request.get_json(silent=True) is None
+            with pytest.raises(BadRequest):
+                flask.request.get_json(silent=False)
+
+    def test_different_silent_on_normal_request(self, app):
+        with app.test_request_context('/', method='POST', json={'foo': 'bar'}):
+            silent_rv = flask.request.get_json(silent=True)
+            normal_rv = flask.request.get_json(silent=False)
+            assert silent_rv is normal_rv
+            assert normal_rv['foo'] == 'bar'
 
     def test_post_empty_json_adds_exception_to_response_content_in_debug(self, app, client):
         app.config['DEBUG'] = True
@@ -105,16 +152,6 @@ class TestJSON(object):
 
         rv = client.post('/json', data='"foo"', content_type='application/x+json')
         assert rv.data == b'foo'
-
-    def test_json_body_encoding(self, app, client):
-
-        @app.route('/')
-        def index():
-            return flask.request.get_json()
-
-        resp = client.get('/', data=u'"Hällo Wörld"'.encode('iso-8859-15'),
-                          content_type='application/json; charset=iso-8859-15')
-        assert resp.data == u'Hällo Wörld'.encode('utf-8')
 
     @pytest.mark.parametrize('test_value,expected', [(True, '"\\u2603"'), (False, u'"\u2603"')])
     def test_json_as_unicode(self, test_value, expected, app, app_ctx):
@@ -504,9 +541,18 @@ class TestSendfile(object):
         assert 'x-sendfile' not in rv.headers
         rv.close()
 
+    def test_send_file_pathlike(self, app, req_ctx):
+        rv = flask.send_file(FakePath('static/index.html'))
+        assert rv.direct_passthrough
+        assert rv.mimetype == 'text/html'
+        with app.open_resource('static/index.html') as f:
+            rv.direct_passthrough = False
+            assert rv.data == f.read()
+        rv.close()
+
     @pytest.mark.skipif(
         not callable(getattr(Range, 'to_content_range_header', None)),
-        reason="not implement within werkzeug"
+        reason="not implemented within werkzeug"
     )
     def test_send_file_range_request(self, app, client):
         @app.route('/')
@@ -563,7 +609,45 @@ class TestSendfile(object):
         assert rv.status_code == 200
         rv.close()
 
+    def test_send_file_range_request_bytesio(self, app, client):
+        @app.route('/')
+        def index():
+            file = io.BytesIO(b'somethingsomething')
+            return flask.send_file(
+                file, attachment_filename='filename', conditional=True
+            )
+
+        rv = client.get('/', headers={'Range': 'bytes=4-15'})
+        assert rv.status_code == 206
+        assert rv.data == b'somethingsomething'[4:16]
+        rv.close()
+
+    @pytest.mark.skipif(
+        not callable(getattr(Range, 'to_content_range_header', None)),
+        reason="not implemented within werkzeug"
+    )
+    def test_send_file_range_request_xsendfile_invalid(self, app, client):
+        # https://github.com/pallets/flask/issues/2526
+        app.use_x_sendfile = True
+
+        @app.route('/')
+        def index():
+            return flask.send_file('static/index.html', conditional=True)
+
+        rv = client.get('/', headers={'Range': 'bytes=1000-'})
+        assert rv.status_code == 416
+        rv.close()
+
     def test_attachment(self, app, req_ctx):
+        app = flask.Flask(__name__)
+        with app.test_request_context():
+            with open(os.path.join(app.root_path, 'static/index.html')) as f:
+                rv = flask.send_file(f, as_attachment=True,
+                                     attachment_filename='index.html')
+                value, options = \
+                    parse_options_header(rv.headers['Content-Disposition'])
+                assert value == 'attachment'
+                rv.close()
 
         with open(os.path.join(app.root_path, 'static/index.html')) as f:
             rv = flask.send_file(f, as_attachment=True,
@@ -590,15 +674,24 @@ class TestSendfile(object):
         assert options['filename'] == 'index.txt'
         rv.close()
 
-    def test_attachment_with_utf8_filename(self, app, req_ctx):
-        rv = flask.send_file('static/index.html', as_attachment=True, attachment_filename=u'Ñandú／pingüino.txt')
-        content_disposition = set(rv.headers['Content-Disposition'].split('; '))
-        assert content_disposition == set((
-            'attachment',
-            'filename="Nandu/pinguino.txt"',
-            "filename*=UTF-8''%C3%91and%C3%BA%EF%BC%8Fping%C3%BCino.txt"
-        ))
+    @pytest.mark.usefixtures('req_ctx')
+    @pytest.mark.parametrize(('filename', 'ascii', 'utf8'), (
+        ('index.html', 'index.html', False),
+        (u'Ñandú／pingüino.txt', '"Nandu/pinguino.txt"',
+        '%C3%91and%C3%BA%EF%BC%8Fping%C3%BCino.txt'),
+        (u'Vögel.txt', 'Vogel.txt', 'V%C3%B6gel.txt'),
+        # Native string not marked as Unicode on Python 2
+        ('tést.txt', 'test.txt', 't%C3%A9st.txt'),
+    ))
+    def test_attachment_filename_encoding(self, filename, ascii, utf8):
+        rv = flask.send_file('static/index.html', as_attachment=True, attachment_filename=filename)
         rv.close()
+        content_disposition = rv.headers['Content-Disposition']
+        assert 'filename=%s' % ascii in content_disposition
+        if utf8:
+            assert "filename*=UTF-8''" + utf8 in content_disposition
+        else:
+            assert "filename*=UTF-8''" not in content_disposition
 
     def test_static_file(self, app, req_ctx):
         # default cache timeout is 12 hours
@@ -626,6 +719,12 @@ class TestSendfile(object):
         assert cc.max_age == 3600
         rv.close()
 
+        # Test with static file handler.
+        rv = app.send_static_file(FakePath('index.html'))
+        cc = parse_cache_control_header(rv.headers['Cache-Control'])
+        assert cc.max_age == 3600
+        rv.close()
+
         class StaticFileApp(flask.Flask):
             def get_send_file_max_age(self, filename):
                 return 10
@@ -647,6 +746,14 @@ class TestSendfile(object):
         app.root_path = os.path.join(os.path.dirname(__file__),
                                      'test_apps', 'subdomaintestmodule')
         rv = flask.send_from_directory('static', 'hello.txt')
+        rv.direct_passthrough = False
+        assert rv.data.strip() == b'Hello Subdomain'
+        rv.close()
+
+    def test_send_from_directory_pathlike(self, app, req_ctx):
+        app.root_path = os.path.join(os.path.dirname(__file__),
+                                     'test_apps', 'subdomaintestmodule')
+        rv = flask.send_from_directory(FakePath('static'), FakePath('hello.txt'))
         rv.direct_passthrough = False
         assert rv.data.strip() == b'Hello Subdomain'
         rv.close()
@@ -861,7 +968,7 @@ class TestSafeJoin(object):
 class TestHelpers(object):
 
     @pytest.mark.parametrize('debug, expected_flag, expected_default_flag', [
-        ('', None, True),
+        ('', False, False),
         ('0', False, False),
         ('False', False, False),
         ('No', False, False),
@@ -873,7 +980,18 @@ class TestHelpers(object):
             assert get_debug_flag() is None
         else:
             assert get_debug_flag() == expected_flag
-        assert get_debug_flag(default=True) == expected_default_flag
+        assert get_debug_flag() == expected_default_flag
+
+    @pytest.mark.parametrize('env, ref_env, debug', [
+        ('', 'production', False),
+        ('production', 'production', False),
+        ('development', 'development', True),
+        ('other', 'other', False),
+    ])
+    def test_get_env(self, monkeypatch, env, ref_env, debug):
+        monkeypatch.setenv('FLASK_ENV', env)
+        assert get_debug_flag() == debug
+        assert get_env() == ref_env
 
     def test_make_response(self):
         app = flask.Flask(__name__)

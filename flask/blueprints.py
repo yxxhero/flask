@@ -6,10 +6,11 @@
     Blueprints are the recommended way to implement larger or more
     pluggable applications in Flask 0.7 and later.
 
-    :copyright: (c) 2015 by Armin Ronacher.
+    :copyright: © 2010 by the Pallets team.
     :license: BSD, see LICENSE for more details.
 """
 from functools import update_wrapper
+from werkzeug.urls import url_join
 
 from .helpers import _PackageBoundObject, _endpoint_from_view_func
 
@@ -49,7 +50,6 @@ class BlueprintSetupState(object):
         url_prefix = self.options.get('url_prefix')
         if url_prefix is None:
             url_prefix = self.blueprint.url_prefix
-
         #: The prefix that should be used for all URLs defined on the
         #: blueprint.
         self.url_prefix = url_prefix
@@ -64,8 +64,12 @@ class BlueprintSetupState(object):
         to the application.  The endpoint is automatically prefixed with the
         blueprint's name.
         """
-        if self.url_prefix:
-            rule = self.url_prefix + rule
+        if self.url_prefix is not None:
+            if rule:
+                rule = '/'.join((
+                    self.url_prefix.rstrip('/'), rule.lstrip('/')))
+            else:
+                rule = self.url_prefix
         options.setdefault('subdomain', self.subdomain)
         if endpoint is None:
             endpoint = _endpoint_from_view_func(view_func)
@@ -198,6 +202,8 @@ class Blueprint(_PackageBoundObject):
         """
         if endpoint:
             assert '.' not in endpoint, "Blueprint endpoints should not contain dots"
+        if view_func and hasattr(view_func, '__name__'):
+            assert '.' not in view_func.__name__, "Blueprint view function name should not contain dots"
         self.record(lambda s:
             s.add_url_rule(rule, endpoint, view_func, **options))
 

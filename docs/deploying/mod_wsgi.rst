@@ -27,21 +27,21 @@ follows:
 
 .. sourcecode:: text
 
-    # apt-get install libapache2-mod-wsgi
+    $ apt-get install libapache2-mod-wsgi
 
 If you are using a yum based distribution (Fedora, OpenSUSE, etc..) you
 can install it as follows:
 
 .. sourcecode:: text
 
-    # yum install mod_wsgi
+    $ yum install mod_wsgi
 
 On FreeBSD install `mod_wsgi` by compiling the `www/mod_wsgi` port or by
 using pkg_add:
 
 .. sourcecode:: text
 
-    # pkg install ap22-mod_wsgi2
+    $ pkg install ap22-mod_wsgi2
 
 If you are using pkgsrc you can install `mod_wsgi` by compiling the
 `www/ap2-wsgi` package.
@@ -60,6 +60,11 @@ application.
 For most applications the following file should be sufficient::
 
     from yourapplication import app as application
+
+If a factory function is used in a :file:`__init__.py` file, then the function should be imported::
+
+    from yourapplication import create_app
+    application = create_app()
 
 If you don't have a factory function for application creation but a singleton
 instance you can directly import that one as `application`.
@@ -134,7 +139,7 @@ For more information consult the `mod_wsgi documentation`_.
 
 .. _mod_wsgi: https://github.com/GrahamDumpleton/mod_wsgi
 .. _installation instructions: https://modwsgi.readthedocs.io/en/develop/installation.html
-.. _virtual python: https://pypi.python.org/pypi/virtualenv
+.. _virtual python: https://pypi.org/project/virtualenv/
 .. _mod_wsgi documentation: https://modwsgi.readthedocs.io/en/develop/index.html
 
 Troubleshooting

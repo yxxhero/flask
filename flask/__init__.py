@@ -6,11 +6,11 @@
     A microframework based on Werkzeug.  It's extensively documented
     and follows best practice patterns.
 
-    :copyright: (c) 2015 by Armin Ronacher.
+    :copyright: © 2010 by the Pallets team.
     :license: BSD, see LICENSE for more details.
 """
 
-__version__ = '0.13-dev'
+__version__ = '1.1.dev'
 
 # utilities we import from Werkzeug and Jinja2 that are unused
 # in the module but are exported as public interface.
@@ -43,7 +43,3 @@ from . import json
 # This was the only thing that Flask used to export at one point and it had
 # a more generic name.
 jsonify = json.jsonify
-
-# backwards compat, goes away in 1.0
-from .sessions import SecureCookieSession as Session
-json_available = True

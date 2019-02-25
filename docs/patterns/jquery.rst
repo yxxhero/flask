@@ -11,7 +11,7 @@ Python primitives (numbers, strings, dicts and lists) look like which is
 widely supported and very easy to parse.  It became popular a few years
 ago and quickly replaced XML as transport format in web applications.
 
-.. _jQuery: http://jquery.com/
+.. _jQuery: https://jquery.com/
 
 Loading jQuery
 --------------
@@ -105,7 +105,7 @@ example that shows how you would use jQuery and Flask nonetheless::
         return render_template('index.html')
 
 As you can see I also added an `index` method here that renders a
-template.  This template will load jQuery as above and have a little form
+template.  This template will load jQuery as above and have a little form where
 we can add two numbers and a link to trigger the function on the server
 side.
 
@@ -162,7 +162,6 @@ explanation of the little bit of code above:
    argument.  Note that we can use the `$SCRIPT_ROOT` variable here that
    we set earlier.
 
-If you don't get the whole picture, download the `sourcecode
-for this example
-<https://github.com/pallets/flask/tree/master/examples/jqueryexample>`_
-from GitHub.
+Check out the :gh:`example source <examples/javascript>` for a full
+application demonstrating the code on this page, as well as the same
+thing using ``XMLHttpRequest`` and ``fetch``.

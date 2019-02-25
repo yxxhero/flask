@@ -5,7 +5,7 @@
 
     Tests the application context.
 
-    :copyright: (c) 2015 by Armin Ronacher.
+    :copyright: © 2010 by the Pallets team.
     :license: BSD, see LICENSE for more details.
 """
 
@@ -159,6 +159,8 @@ def test_app_ctx_globals_methods(app, app_ctx):
     assert flask.g.pop('bar', 'more cake') == 'more cake'
     # __iter__
     assert list(flask.g) == ['foo']
+    #__repr__
+    assert repr(flask.g) == "<flask.g of 'flask_test'>"
 
 
 def test_custom_app_ctx_globals_class(app):
@@ -215,5 +217,5 @@ def test_clean_pop(app):
     except ZeroDivisionError:
         pass
 
-    assert called == ['conftest', 'TEARDOWN']
+    assert called == ['flask_test', 'TEARDOWN']
     assert not flask.current_app

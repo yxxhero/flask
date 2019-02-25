@@ -3,18 +3,19 @@
     tests.test_cli
     ~~~~~~~~~~~~~~
 
-    :copyright: (c) 2016 by the Flask Team, see AUTHORS for more details.
+    :copyright: © 2010 by the Pallets team.
     :license: BSD, see LICENSE for more details.
 """
-#
-# This file was part of Flask-CLI and was modified under the terms its license,
-# the Revised BSD License.
-# Copyright (C) 2015 CERN.
-#
+
+# This file was part of Flask-CLI and was modified under the terms of
+# its Revised BSD License. Copyright © 2015 CERN.
+
 from __future__ import absolute_import
 
 import os
+import ssl
 import sys
+import types
 from functools import partial
 
 import click
@@ -23,27 +24,16 @@ from _pytest.monkeypatch import notset
 from click.testing import CliRunner
 
 from flask import Flask, current_app
-from flask.cli import AppGroup, FlaskGroup, NoAppException, ScriptInfo, dotenv, \
-    find_best_app, get_version, load_dotenv, locate_app, prepare_import, \
+from flask.cli import (
+    AppGroup, FlaskGroup, NoAppException, ScriptInfo, dotenv, find_best_app,
+    get_version, load_dotenv, locate_app, prepare_import, run_command,
     with_appcontext
+)
 
 cwd = os.getcwd()
 test_path = os.path.abspath(os.path.join(
     os.path.dirname(__file__), 'test_apps'
 ))
-
-
-@pytest.fixture(autouse=True)
-def manage_os_environ(monkeypatch):
-    # can't use monkeypatch.delitem since we don't want to restore a value
-    os.environ.pop('FLASK_APP', None)
-    os.environ.pop('FLASK_DEBUG', None)
-    # use monkeypatch internals to force-delete environ keys
-    monkeypatch._setitem.extend((
-        (os.environ, 'FLASK_APP', notset),
-        (os.environ, 'FLASK_DEBUG', notset),
-        (os.environ, 'FLASK_RUN_FROM_CLI', notset),
-    ))
 
 
 @pytest.fixture
@@ -144,6 +134,13 @@ def test_find_best_app(test_apps):
 
     pytest.raises(NoAppException, find_best_app, script_info, Module)
 
+    class Module:
+        @staticmethod
+        def create_app():
+            raise TypeError('bad bad factory!')
+
+    pytest.raises(TypeError, find_best_app, script_info, Module)
+
 
 @pytest.mark.parametrize('value,path,result', (
     ('test', cwd, 'test'),
@@ -200,6 +197,8 @@ def test_prepare_import(request, value, path, result):
     ('cliapp.factory', 'create_app2("foo", "bar", )', 'app2_foo_bar'),
     # takes script_info
     ('cliapp.factory', 'create_app3("foo")', 'app3_foo_spam'),
+    # strip whitespace
+    ('cliapp.factory', ' create_app () ', 'app'),
 ))
 def test_locate_app(test_apps, iname, aname, result):
     info = ScriptInfo()
@@ -213,12 +212,14 @@ def test_locate_app(test_apps, iname, aname, result):
     ('cliapp.app', 'notanapp'),
     # not enough arguments
     ('cliapp.factory', 'create_app2("foo")'),
+    # invalid identifier
+    ('cliapp.factory', 'create_app('),
+    # no app returned
+    ('cliapp.factory', 'no_app'),
     # nested import error
     ('cliapp.importerrorapp', None),
     # not a Python file
     ('cliapp.message.txt', None),
-    # space before arg list
-    ('cliapp.factory', 'create_app ()'),
 ))
 def test_locate_app_raises(test_apps, iname, aname):
     info = ScriptInfo()
@@ -240,9 +241,9 @@ def test_locate_app_suppress_raise():
 
 
 def test_get_version(test_apps, capsys):
-    """Test of get_version."""
-    from flask import __version__ as flask_ver
-    from sys import version as py_ver
+    from flask import __version__ as flask_version
+    from werkzeug import __version__ as werkzeug_version
+    from platform import python_version
 
     class MockCtx(object):
         resilient_parsing = False
@@ -253,15 +254,29 @@ def test_get_version(test_apps, capsys):
     ctx = MockCtx()
     get_version(ctx, None, "test")
     out, err = capsys.readouterr()
-    assert flask_ver in out
-    assert py_ver in out
+    assert "Python " + python_version() in out
+    assert "Flask " + flask_version in out
+    assert "Werkzeug " + werkzeug_version in out
 
 
 def test_scriptinfo(test_apps, monkeypatch):
     """Test of ScriptInfo."""
     obj = ScriptInfo(app_import_path="cliapp.app:testapp")
-    assert obj.load_app().name == "testapp"
-    assert obj.load_app().name == "testapp"
+    app = obj.load_app()
+    assert app.name == "testapp"
+    assert obj.load_app() is app
+
+    # import app with module's absolute path
+    cli_app_path = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), 'test_apps', 'cliapp', 'app.py'))
+    obj = ScriptInfo(app_import_path=cli_app_path)
+    app = obj.load_app()
+    assert app.name == 'testapp'
+    assert obj.load_app() is app
+    obj = ScriptInfo(app_import_path=cli_app_path + ':testapp')
+    app = obj.load_app()
+    assert app.name == 'testapp'
+    assert obj.load_app() is app
 
     def create_app(info):
         return Flask("createapp")
@@ -269,7 +284,7 @@ def test_scriptinfo(test_apps, monkeypatch):
     obj = ScriptInfo(create_app=create_app)
     app = obj.load_app()
     assert app.name == "createapp"
-    assert obj.load_app() == app
+    assert obj.load_app() is app
 
     obj = ScriptInfo()
     pytest.raises(NoAppException, obj.load_app)
@@ -355,6 +370,28 @@ def test_flaskgroup(runner):
     assert result.output == 'flaskgroup\n'
 
 
+@pytest.mark.parametrize('set_debug_flag', (True, False))
+def test_flaskgroup_debug(runner, set_debug_flag):
+    """Test FlaskGroup debug flag behavior."""
+
+    def create_app(info):
+        app = Flask("flaskgroup")
+        app.debug = True
+        return app
+
+    @click.group(cls=FlaskGroup, create_app=create_app, set_debug_flag=set_debug_flag)
+    def cli(**params):
+        pass
+
+    @cli.command()
+    def test():
+        click.echo(str(current_app.debug))
+
+    result = runner.invoke(cli, ['test'])
+    assert result.exit_code == 0
+    assert result.output == '%s\n' % str(not set_debug_flag)
+
+
 def test_print_exceptions(runner):
     """Print the stacktrace if the CLI."""
 
@@ -386,6 +423,17 @@ class TestRoutes:
             @app.route('/zzz_post', methods=['POST'])
             def aaa_post():
                 pass
+
+            return app
+
+        cli = FlaskGroup(create_app=create_app)
+        return partial(runner.invoke, cli)
+
+    @pytest.fixture
+    def invoke_no_routes(self, runner):
+        def create_app(info):
+            app = Flask(__name__, static_folder=None)
+            app.testing = True
 
             return app
 
@@ -429,6 +477,11 @@ class TestRoutes:
         output = invoke(['routes', '--all-methods']).output
         assert 'GET, HEAD, OPTIONS, POST' in output
 
+    def test_no_routes(self, invoke_no_routes):
+        result = invoke_no_routes(['routes'])
+        assert result.exit_code == 0
+        assert 'No routes were registered.' in result.output
+
 
 need_dotenv = pytest.mark.skipif(
     dotenv is None, reason='dotenv is not installed'
@@ -471,3 +524,70 @@ def test_dotenv_optional(monkeypatch):
     monkeypatch.chdir(test_path)
     load_dotenv()
     assert 'FOO' not in os.environ
+
+
+@need_dotenv
+def test_disable_dotenv_from_env(monkeypatch, runner):
+    monkeypatch.chdir(test_path)
+    monkeypatch.setitem(os.environ, 'FLASK_SKIP_DOTENV', '1')
+    runner.invoke(FlaskGroup())
+    assert 'FOO' not in os.environ
+
+
+def test_run_cert_path():
+    # no key
+    with pytest.raises(click.BadParameter):
+        run_command.make_context('run', ['--cert', __file__])
+
+    # no cert
+    with pytest.raises(click.BadParameter):
+        run_command.make_context('run', ['--key', __file__])
+
+    ctx = run_command.make_context(
+        'run', ['--cert', __file__, '--key', __file__])
+    assert ctx.params['cert'] == (__file__, __file__)
+
+
+def test_run_cert_adhoc(monkeypatch):
+    monkeypatch.setitem(sys.modules, 'OpenSSL', None)
+
+    # pyOpenSSL not installed
+    with pytest.raises(click.BadParameter):
+        run_command.make_context('run', ['--cert', 'adhoc'])
+
+    # pyOpenSSL installed
+    monkeypatch.setitem(sys.modules, 'OpenSSL', types.ModuleType('OpenSSL'))
+    ctx = run_command.make_context('run', ['--cert', 'adhoc'])
+    assert ctx.params['cert'] == 'adhoc'
+
+    # no key with adhoc
+    with pytest.raises(click.BadParameter):
+        run_command.make_context('run', ['--cert', 'adhoc', '--key', __file__])
+
+
+def test_run_cert_import(monkeypatch):
+    monkeypatch.setitem(sys.modules, 'not_here', None)
+
+    # ImportError
+    with pytest.raises(click.BadParameter):
+        run_command.make_context('run', ['--cert', 'not_here'])
+
+    # not an SSLContext
+    if sys.version_info >= (2, 7, 9):
+        with pytest.raises(click.BadParameter):
+            run_command.make_context('run', ['--cert', 'flask'])
+
+    # SSLContext
+    if sys.version_info < (2, 7, 9):
+        ssl_context = object()
+    else:
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_SSLv23)
+
+    monkeypatch.setitem(sys.modules, 'ssl_context', ssl_context)
+    ctx = run_command.make_context('run', ['--cert', 'ssl_context'])
+    assert ctx.params['cert'] is ssl_context
+
+    # no --key with SSLContext
+    with pytest.raises(click.BadParameter):
+        run_command.make_context(
+            'run', ['--cert', 'ssl_context', '--key', __file__])

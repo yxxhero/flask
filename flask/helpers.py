@@ -5,10 +5,10 @@
 
     Implements various helpers.
 
-    :copyright: (c) 2015 by Armin Ronacher.
+    :copyright: © 2010 by the Pallets team.
     :license: BSD, see LICENSE for more details.
 """
-
+import io
 import os
 import socket
 import sys
@@ -22,28 +22,18 @@ import unicodedata
 from werkzeug.routing import BuildError
 from functools import update_wrapper
 
-try:
-    from werkzeug.urls import url_quote
-except ImportError:
-    from urlparse import quote as url_quote
-
+from werkzeug.urls import url_quote
 from werkzeug.datastructures import Headers, Range
 from werkzeug.exceptions import BadRequest, NotFound, \
     RequestedRangeNotSatisfiable
 
-# this was moved in 0.7
-try:
-    from werkzeug.wsgi import wrap_file
-except ImportError:
-    from werkzeug.utils import wrap_file
-
+from werkzeug.wsgi import wrap_file
 from jinja2 import FileSystemLoader
 
 from .signals import message_flashed
 from .globals import session, _request_ctx_stack, _app_ctx_stack, \
      current_app, request
-from ._compat import string_types, text_type
-
+from ._compat import string_types, text_type, PY2, fspath
 
 # sentinel
 _missing = object()
@@ -56,11 +46,41 @@ _os_alt_seps = list(sep for sep in [os.path.sep, os.path.altsep]
                     if sep not in (None, '/'))
 
 
-def get_debug_flag(default=None):
+def get_env():
+    """Get the environment the app is running in, indicated by the
+    :envvar:`FLASK_ENV` environment variable. The default is
+    ``'production'``.
+    """
+    return os.environ.get('FLASK_ENV') or 'production'
+
+
+def get_debug_flag():
+    """Get whether debug mode should be enabled for the app, indicated
+    by the :envvar:`FLASK_DEBUG` environment variable. The default is
+    ``True`` if :func:`.get_env` returns ``'development'``, or ``False``
+    otherwise.
+    """
     val = os.environ.get('FLASK_DEBUG')
+
+    if not val:
+        return get_env() == 'development'
+
+    return val.lower() not in ('0', 'false', 'no')
+
+
+def get_load_dotenv(default=True):
+    """Get whether the user has disabled loading dotenv files by setting
+    :envvar:`FLASK_SKIP_DOTENV`. The default is ``True``, load the
+    files.
+
+    :param default: What to return if the env var isn't set.
+    """
+    val = os.environ.get('FLASK_SKIP_DOTENV')
+
     if not val:
         return default
-    return val.lower() not in ('0', 'false', 'no')
+
+    return val.lower() in ('0', 'false', 'no')
 
 
 def _endpoint_from_view_func(view_func):
@@ -383,7 +403,7 @@ def flash(message, category='message'):
     #     session.setdefault('_flashes', []).append((category, message))
     #
     # This assumed that changes made to mutable structures in the session are
-    # are always in sync with the session object, which is not true for session
+    # always in sync with the session object, which is not true for session
     # implementations that use external storage for keeping their keys/values.
     flashes = session.get('_flashes', [])
     flashes.append((category, message))
@@ -481,10 +501,20 @@ def send_file(filename_or_fp, mimetype=None, as_attachment=False,
        The `attachment_filename` is preferred over `filename` for MIME-type
        detection.
 
-    .. versionchanged:: 0.13
+    .. versionchanged:: 1.0
         UTF-8 filenames, as specified in `RFC 2231`_, are supported.
 
     .. _RFC 2231: https://tools.ietf.org/html/rfc2231#section-4
+
+    .. versionchanged:: 1.0.3
+        Filenames are encoded with ASCII instead of Latin-1 for broader
+        compatibility with WSGI servers.
+
+    .. versionchanged:: 1.1
+        Filename may be a :class:`~os.PathLike` object.
+
+    .. versionadded:: 1.1
+        Partial content supports :class:`~io.BytesIO`.
 
     :param filename_or_fp: the filename of the file to send.
                            This is relative to the :attr:`~Flask.root_path`
@@ -514,6 +544,10 @@ def send_file(filename_or_fp, mimetype=None, as_attachment=False,
     """
     mtime = None
     fsize = None
+
+    if hasattr(filename_or_fp, '__fspath__'):
+        filename_or_fp = fspath(filename_or_fp)
+
     if isinstance(filename_or_fp, string_types):
         filename = filename_or_fp
         if not os.path.isabs(filename):
@@ -543,12 +577,15 @@ def send_file(filename_or_fp, mimetype=None, as_attachment=False,
             raise TypeError('filename unavailable, required for '
                             'sending as attachment')
 
+        if not isinstance(attachment_filename, text_type):
+            attachment_filename = attachment_filename.decode('utf-8')
+
         try:
-            attachment_filename = attachment_filename.encode('latin-1')
+            attachment_filename = attachment_filename.encode('ascii')
         except UnicodeEncodeError:
             filenames = {
                 'filename': unicodedata.normalize(
-                    'NFKD', attachment_filename).encode('latin-1', 'ignore'),
+                    'NFKD', attachment_filename).encode('ascii', 'ignore'),
                 'filename*': "UTF-8''%s" % url_quote(attachment_filename),
             }
         else:
@@ -568,6 +605,13 @@ def send_file(filename_or_fp, mimetype=None, as_attachment=False,
             file = open(filename, 'rb')
             mtime = os.path.getmtime(filename)
             fsize = os.path.getsize(filename)
+            headers['Content-Length'] = fsize
+        elif isinstance(file, io.BytesIO):
+            try:
+                fsize = file.getbuffer().nbytes
+            except AttributeError:
+                # Python 2 doesn't have getbuffer
+                fsize = len(file.getvalue())
             headers['Content-Length'] = fsize
         data = wrap_file(request.environ, file)
 
@@ -603,17 +647,13 @@ def send_file(filename_or_fp, mimetype=None, as_attachment=False,
                  'headers' % filename, stacklevel=2)
 
     if conditional:
-        if callable(getattr(Range, 'to_content_range_header', None)):
-            # Werkzeug supports Range Requests
-            # Remove this test when support for Werkzeug <0.12 is dropped
-            try:
-                rv = rv.make_conditional(request, accept_ranges=True,
-                                         complete_length=fsize)
-            except RequestedRangeNotSatisfiable:
+        try:
+            rv = rv.make_conditional(request, accept_ranges=True,
+                                     complete_length=fsize)
+        except RequestedRangeNotSatisfiable:
+            if file is not None:
                 file.close()
-                raise
-        else:
-            rv = rv.make_conditional(request)
+            raise
         # make sure we don't send x-sendfile for servers that
         # ignore the 304 status code for x-sendfile.
         if rv.status_code == 304:
@@ -685,6 +725,8 @@ def send_from_directory(directory, filename, **options):
     :param options: optional keyword arguments that are directly
                     forwarded to :func:`send_file`.
     """
+    filename = fspath(filename)
+    directory = fspath(directory)
     filename = safe_join(directory, filename)
     if not os.path.isabs(filename):
         filename = os.path.join(current_app.root_path, filename)
@@ -1001,12 +1043,21 @@ def total_seconds(td):
 def is_ip(value):
     """Determine if the given string is an IP address.
 
+    Python 2 on Windows doesn't provide ``inet_pton``, so this only
+    checks IPv4 addresses in that environment.
+
     :param value: value to check
     :type value: str
 
     :return: True if string is an IP address
     :rtype: bool
     """
+    if PY2 and os.name == 'nt':
+        try:
+            socket.inet_aton(value)
+            return True
+        except socket.error:
+            return False
 
     for family in (socket.AF_INET, socket.AF_INET6):
         try:

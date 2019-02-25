@@ -1,4 +1,12 @@
 # -*- coding: utf-8 -*-
+"""
+tests.test_user_error_handler
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:copyright: © 2010 by the Pallets team.
+:license: BSD, see LICENSE for more details.
+"""
+
 from werkzeug.exceptions import (
     Forbidden,
     InternalServerError,
@@ -176,6 +184,10 @@ def test_default_error_handler():
     def forbidden():
         raise Forbidden()
 
+    @app.route("/slash/")
+    def slash():
+        return "slash"
+
     app.register_blueprint(bp, url_prefix='/bp')
 
     c = app.test_client()
@@ -183,5 +195,5 @@ def test_default_error_handler():
     assert c.get('/bp/forbidden').data == b'bp-forbidden'
     assert c.get('/undefined').data == b'default'
     assert c.get('/forbidden').data == b'forbidden'
-
-
+    # Don't handle RequestRedirect raised when adding slash.
+    assert c.get("/slash", follow_redirects=True).data == b"slash"

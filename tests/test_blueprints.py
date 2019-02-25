@@ -5,10 +5,11 @@
 
     Blueprints (and currently modules)
 
-    :copyright: (c) 2015 by Armin Ronacher.
+    :copyright: © 2010 by the Pallets team.
     :license: BSD, see LICENSE for more details.
 """
 
+import functools
 import pytest
 
 import flask
@@ -114,7 +115,31 @@ def test_blueprint_app_error_handling(app, client):
     assert client.get('/nope').data == b'you shall not pass'
 
 
-def test_blueprint_url_definitions(app, client):
+@pytest.mark.parametrize(('prefix', 'rule', 'url'), (
+    ('', '/', '/'),
+    ('/', '', '/'),
+    ('/', '/', '/'),
+    ('/foo', '', '/foo'),
+    ('/foo/', '', '/foo/'),
+    ('', '/bar', '/bar'),
+    ('/foo/', '/bar', '/foo/bar'),
+    ('/foo/', 'bar', '/foo/bar'),
+    ('/foo', '/bar', '/foo/bar'),
+    ('/foo/', '//bar', '/foo/bar'),
+    ('/foo//', '/bar', '/foo/bar'),
+))
+def test_blueprint_prefix_slash(app, client, prefix, rule, url):
+    bp = flask.Blueprint('test', __name__, url_prefix=prefix)
+
+    @bp.route(rule)
+    def index():
+        return '', 204
+
+    app.register_blueprint(bp)
+    assert client.get(url).status_code == 204
+
+
+def test_blueprint_url_defaults(app, client):
     bp = flask.Blueprint('test', __name__)
 
     @bp.route('/foo', defaults={'baz': 42})
@@ -359,6 +384,17 @@ def test_route_decorator_custom_endpoint_with_dots(app, client):
         bp.route('/bar/123', endpoint='bar.123'),
         lambda: None
     )
+
+    foo_foo_foo.__name__ = 'bar.123'
+
+    pytest.raises(
+        AssertionError,
+        lambda: bp.add_url_rule(
+            '/bar/123', view_func=foo_foo_foo
+        )
+    )
+
+    bp.add_url_rule('/bar/456', endpoint='foofoofoo', view_func=functools.partial(foo_foo_foo))
 
     app.register_blueprint(bp, url_prefix='/py')
 

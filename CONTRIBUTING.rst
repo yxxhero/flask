@@ -75,7 +75,7 @@ First time setup
 .. _latest version of git: https://git-scm.com/downloads
 .. _username: https://help.github.com/articles/setting-your-username-in-git/
 .. _email: https://help.github.com/articles/setting-your-email-in-git/
-.. _Fork: https://github.com/pallets/flask/pull/2305#fork-destination-box
+.. _Fork: https://github.com/pallets/flask/fork
 .. _Clone: https://help.github.com/articles/fork-a-repo/#step-2-create-a-local-clone-of-your-fork
 
 Start coding
@@ -91,7 +91,7 @@ Start coding
 - Push your commits to GitHub and `create a pull request`_.
 - Celebrate 🎉
 
-.. _committing as you go: http://dont-be-afraid-to-commit.readthedocs.io/en/latest/git/commandlinegit.html#commit-your-changes
+.. _committing as you go: https://dont-be-afraid-to-commit.readthedocs.io/en/latest/git/commandlinegit.html#commit-your-changes
 .. _PEP8: https://pep8.org/
 .. _create a pull request: https://help.github.com/articles/creating-a-pull-request/
 
@@ -109,8 +109,8 @@ depends on which part of Flask you're working on. Travis-CI will run the full
 suite when you submit your pull request.
 
 The full test suite takes a long time to run because it tests multiple
-combinations of Python and dependencies. You need to have Python 2.6, 2.7, 3.3,
-3.4, 3.5 3.6, and PyPy 2.7 installed to run all of the environments. Then run::
+combinations of Python and dependencies. You need to have Python 2.7, 3.4,
+3.5 3.6, and PyPy 2.7 installed to run all of the environments. Then run::
 
     tox
 
@@ -131,8 +131,22 @@ Read more about `coverage <https://coverage.readthedocs.io>`_.
 Running the full test suite with ``tox`` will combine the coverage reports
 from all runs.
 
-``make`` targets
-~~~~~~~~~~~~~~~~
+
+Building the docs
+~~~~~~~~~~~~~~~~~
+
+Build the docs in the ``docs`` directory using Sphinx::
+
+    cd docs
+    make html
+
+Open ``_build/html/index.html`` in your browser to view the docs.
+
+Read more about `Sphinx <https://www.sphinx-doc.org>`_.
+
+
+make targets
+~~~~~~~~~~~~
 
 Flask provides a ``Makefile`` with various shortcuts. They will ensure that
 all dependencies are installed.
